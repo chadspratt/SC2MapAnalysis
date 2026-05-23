@@ -330,9 +330,12 @@ class MapAnalyzerPather:
 
         return grid
 
-    def get_pyastar_grid(self, default_weight: float = 1, include_destructables: bool = True) -> ndarray:
-        grid = self.get_base_pathing_grid(include_destructables)
-        grid = self._add_non_pathables_ground(grid=grid, include_destructables=include_destructables)
+    def get_pyastar_grid(self, default_weight: float = 1, include_destructables: bool = True, base_grid: Optional[ndarray] = None) -> ndarray:
+        if base_grid is None:
+            grid = self.get_base_pathing_grid(include_destructables)
+            grid = self._add_non_pathables_ground(grid=grid, include_destructables=include_destructables)
+        else:
+            grid = base_grid.copy()
 
         grid = np.where(grid != 0, default_weight, np.inf).astype(np.float32)
         return grid
