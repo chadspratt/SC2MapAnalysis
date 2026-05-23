@@ -330,13 +330,9 @@ class MapAnalyzerPather:
 
         return grid
 
-    def get_pyastar_grid(self, default_weight: float = 1, include_destructables: bool = True, base_grid: Optional[ndarray] = None) -> ndarray:
-        if base_grid is None:
-            grid = self.get_base_pathing_grid(include_destructables)
-            grid = self._add_non_pathables_ground(grid=grid, include_destructables=include_destructables)
-        else:
-            grid = base_grid.copy()
-
+    def get_pyastar_grid(self, default_weight: float = 1, include_destructables: bool = True) -> ndarray:
+        grid = self.get_base_pathing_grid(include_destructables)
+        grid = self._add_non_pathables_ground(grid=grid, include_destructables=include_destructables)
         grid = np.where(grid != 0, default_weight, np.inf).astype(np.float32)
         return grid
 
@@ -350,6 +346,8 @@ class MapAnalyzerPather:
         if grid is None:
             logger.warning("Using the default pyastar grid as no grid was provided.")
             grid = self.get_pyastar_grid()
+        else:
+            grid = np.where(grid != 0, grid, np.inf).astype(np.float32)
 
         if start is None or goal is None:
             logger.warning(PatherNoPointsException(start=start, goal=goal))
