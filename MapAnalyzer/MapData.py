@@ -1,28 +1,30 @@
 import math
-from itertools import chain
 from functools import lru_cache
+from itertools import chain
+from loguru import logger
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
-from loguru import logger
-from numpy import float64, int64, ndarray
-from pkg_resources import DistributionNotFound, get_distribution
-from sc2.bot_ai import BotAI
-from sc2.position import Point2
-from scipy.ndimage import binary_fill_holes, center_of_mass, generate_binary_structure, label as ndlabel
-from scipy.spatial import distance
-
+from MapAnalyzer.constructs import ChokeArea, MDRamp, RawChoke, VisionBlockerArea
 from MapAnalyzer.Debugger import MapAnalyzerDebugger
 from MapAnalyzer.Pather import MapAnalyzerPather
 from MapAnalyzer.Region import Region
-from MapAnalyzer.utils import get_sets_with_mutual_elements, fix_map_ramps
+from MapAnalyzer.utils import fix_map_ramps, get_sets_with_mutual_elements
+from numpy import int64, ndarray
+from pkg_resources import DistributionNotFound, get_distribution
+from sc2.bot_ai import BotAI
+from sc2.position import Point2
+from scipy.ndimage import binary_fill_holes, center_of_mass, generate_binary_structure
+from scipy.ndimage import label as ndlabel
+from scipy.spatial import distance
 
-from .constants import BINARY_STRUCTURE, CORNER_MIN_DISTANCE, MAX_REGION_AREA, MIN_REGION_AREA
-
-from .decorators import progress_wrapped
-from .exceptions import CustomDeprecationWarning
-from MapAnalyzer.constructs import ChokeArea, MDRamp, VisionBlockerArea, RawChoke
-from .cext import CMapInfo, CMapChoke
+from .cext import CMapChoke, CMapInfo
+from .constants import (
+    BINARY_STRUCTURE,
+    CORNER_MIN_DISTANCE,
+    MAX_REGION_AREA,
+    MIN_REGION_AREA,
+)
 
 try:
     __version__ = get_distribution('sc2mapanalyzer')
@@ -57,12 +59,12 @@ class MapData:
         self.mineral_fields = bot.mineral_field
         self.normal_geysers = bot.vespene_geyser
         self.terrain_height: ndarray = bot.game_info.terrain_height.data_numpy
-        self._vision_blockers: Set[Point2] = bot.game_info.vision_blockers
+        self._vision_blockers: frozenset[Point2] = bot.game_info.vision_blockers
 
         # data that will be generated and cached
         self.min_region_area = MIN_REGION_AREA
         self.max_region_area = MAX_REGION_AREA
-        self.regions: dict = {}  # set later
+        self.regions: Dict[int, Region] = {}  # set later
         self.region_grid: Optional[ndarray] = None
         self.corners: list = []  # set later
         self.polygons: list = []  # set later
@@ -71,7 +73,7 @@ class MapData:
         self.map_vision_blockers: list = []  # set later  on compile
         self.vision_blockers_labels: list = []  # set later  on compile
         self.vision_blockers_grid: list = []  # set later  on compile
-        self.overlord_spots: list = []
+        self.overlord_spots: List[Point2] | None = []
         self.resource_blockers = [Point2((m.position[0], m.position[1])) for m in self.bot.all_units if
                                   any(x in m.name.lower() for x in {"rich", "450"})]
         self.overlapping_choke_ids = None
@@ -83,8 +85,8 @@ class MapData:
 
         # plugins
         self.log_level = loglevel
-        self.debugger = MapAnalyzerDebugger(self, loglevel=self.log_level)
-        self.pather = MapAnalyzerPather(self)
+        self.debugger = MapAnalyzerDebugger(self, loglevel=self.log_level) # type: ignore
+        self.pather = MapAnalyzerPather(self) # type: ignore
 
         self.connectivity_graph = None  # set by pather
         self.nonpathable_indices_stacked = self.pather.nonpathable_indices_stacked
@@ -102,7 +104,7 @@ class MapData:
     """Properties"""
 
     @property
-    def vision_blockers(self) -> Set[Point2]:
+    def vision_blockers(self) -> frozenset[Point2]:
         """
         Exposing the computed method
 
@@ -164,7 +166,7 @@ class MapData:
                                             include_destructables=include_destructables,
                                             )
 
-    def find_lowest_cost_points(self, from_pos: Point2, radius: float, grid: np.ndarray) -> List[Point2]:
+    def find_lowest_cost_points(self, from_pos: Point2, radius: float, grid: np.ndarray) -> List[Point2] | None:
         """
         :rtype:  Union[List[:class:`sc2.position.Point2`], None]
 
@@ -190,7 +192,7 @@ class MapData:
         """
         return self.pather.find_lowest_cost_points(from_pos=from_pos, radius=radius, grid=grid)
 
-    def lowest_cost_points_array(self, from_pos: Point2, radius: float, grid: np.ndarray) -> ndarray:
+    def lowest_cost_points_array(self, from_pos: Point2, radius: float, grid: np.ndarray) -> ndarray | None:
         """
         :rtype:    Union[:class:`numpy.ndarray`, None]
         Same as find_lowest_cost_points, but returns points in ndarray for use
@@ -266,7 +268,7 @@ class MapData:
         """
         return self.pather.get_clean_air_grid(default_weight=default_weight)
 
-    def pathfind(self, start: Union[Tuple[float, float], Point2], goal: Union[Tuple[float, float], Point2],
+    def pathfind(self, start: Union[Tuple[float, float], None], goal: Union[Tuple[float, float], None],
                  grid: Optional[ndarray] = None, large: bool = False, smoothing: bool = False,
                  sensitivity: int = 1) -> Optional[List[Point2]]:
         """
@@ -309,7 +311,7 @@ class MapData:
         return self.pather.pathfind(start=start, goal=goal, grid=grid, large=large, smoothing=smoothing,
                                     sensitivity=sensitivity)
 
-    def pathfind_with_nyduses(self, start: Union[Tuple[float, float], Point2], goal: Union[Tuple[float, float], Point2],
+    def pathfind_with_nyduses(self, start: Union[Tuple[float, float], None], goal: Union[Tuple[float, float], None],
                  grid: Optional[ndarray] = None, large: bool = False, smoothing: bool = False,
                  sensitivity: int = 1) -> Optional[Tuple[List[List[Point2]], Optional[List[int]]]]:
         """
@@ -431,37 +433,37 @@ class MapData:
 
     """Utility methods"""
 
-    def save(self, filename):
-        """
+    # def save(self, filename):
+    #     """
 
-        Save Plot to a file, much like ``plt.save(filename)``
+    #     Save Plot to a file, much like ``plt.save(filename)``
 
-        """
-        self.debugger.save(filename=filename)
+    #     """
+    #     self.debugger.save(filename=filename)
 
-    def show(self):
-        """
+    # def show(self):
+    #     """
 
-        Calling debugger to show, just like ``plt.show()``  but in case there will be changes in debugger,
+    #     Calling debugger to show, just like ``plt.show()``  but in case there will be changes in debugger,
 
-        This method will always be compatible
+    #     This method will always be compatible
 
-        """
-        self.debugger.show()
+    #     """
+    #     self.debugger.show()
 
-    def close(self):
-        """
-        Close an opened plot, just like ``plt.close()``  but in case there will be changes in debugger,
+    # def close(self):
+    #     """
+    #     Close an opened plot, just like ``plt.close()``  but in case there will be changes in debugger,
 
-        This method will always be compatible
+    #     This method will always be compatible
 
-        """
-        self.debugger.close()
+    #     """
+    #     self.debugger.close()
 
     @staticmethod
     def indices_to_points(
             indices: Union[ndarray, Tuple[ndarray, ndarray]]
-    ) -> Set[Union[Tuple[float, float], Point2]]:
+    ) -> Set[Point2]:
         """
         :rtype: :class:`.set` (Union[:class:`.tuple` (:class:`.int`, :class:`.int`), :class:`sc2.position.Point2`)
 
@@ -471,10 +473,10 @@ class MapData:
 
         """
 
-        return set([(indices[0][i], indices[1][i]) for i in range(len(indices[0]))])
+        return set([Point2((indices[0][i], indices[1][i])) for i in range(len(indices[0]))])
 
     @staticmethod
-    def points_to_indices(points: Set[Tuple[float, float]]) -> Tuple[np.ndarray, np.ndarray]:
+    def points_to_indices(points: Set[Tuple[int64, int64]] | List[Point2] | Set[Point2]) -> Tuple[np.ndarray, np.ndarray]:
         """
         :rtype: Tuple[numpy.ndarray, numpy.ndarray]
 
@@ -496,20 +498,20 @@ class MapData:
         """
         rows, cols = self.path_arr.shape
         arr = np.zeros((rows, cols), dtype=np.uint8)
-        if isinstance(points, set):
-            points = list(points)
+        # if isinstance(points, set):
+        #     points = list(points)
 
         def in_bounds_x(x_):
             width = arr.shape[0] - 1
             if 0 < x_ < width:
                 return x_
-            return 0
+            return max(0, width)
 
         def in_bounds_y(y_):
             height = arr.shape[1] - 1
             if 0 < y_ < height:
                 return y_
-            return 0
+            return max(0, height)
 
         x_vec = np.vectorize(in_bounds_x)
         y_vec = np.vectorize(in_bounds_y)
@@ -539,7 +541,7 @@ class MapData:
 
     @staticmethod
     def closest_node_idx(
-            node: Union[Point2, ndarray], nodes: Union[List[Tuple[int, int]], ndarray]
+            node: Union[Point2, Tuple, ndarray], nodes: Union[List[Tuple[int, int]], List[Point2], ndarray]
     ) -> int:
         """
         :rtype: int
@@ -554,7 +556,7 @@ class MapData:
             nodes = np.fromiter(iter, dtype=type(nodes[0][0]), count=len(nodes) * 2).reshape((-1, 2))
 
         closest_index = distance.cdist([node], nodes, "sqeuclidean").argmin()
-        return closest_index
+        return int(closest_index)
 
     def closest_towards_point(
             self, points: List[Point2], target: Union[Point2, tuple]
@@ -668,9 +670,9 @@ class MapData:
 
     def where(
             self, point: Union[Point2, tuple]
-    ) -> Union[Region, MDRamp, ChokeArea, VisionBlockerArea]:
+    ) -> Union[Region, MDRamp, ChokeArea, VisionBlockerArea, None]:
         """
-        :rtype: Union[:mod:`.Region`, :class:`.ChokeArea`, :class:`.VisionBlockerArea`, :class:`.MDRamp`]
+        :rtype: Union[:mod:`.Region`, :class:`.ChokeArea`, :class:`.VisionBlockerArea`, :class:`.MDRamp`, None]
 
         Will query a point on the map and will return the first result in the following order:
 
@@ -753,7 +755,6 @@ class MapData:
                     if isinstance(a, MDRamp):
                         self.polygons.pop(self.polygons.index(pol))
 
-    @progress_wrapped(estimated_time=0, desc=f"\u001b[32m Version {__version__} Map Compilation Progress \u001b[37m")
     def _compile_map(self) -> None:
 
         self._calc_grid()
@@ -775,7 +776,11 @@ class MapData:
     def _calc_grid(self) -> None:
         # converting the placement grid to our own kind of grid
         # cleaning the grid and then searching for 2x2 patterned regions
-        grid = binary_fill_holes(self.placement_arr).astype(int)
+        filled_grid = binary_fill_holes(self.placement_arr)
+        if filled_grid is None:
+            logger.warning(f" [{self.map_name}] binary_fill_holes returned None, using original placement_arr")
+            filled_grid = self.placement_arr
+        grid = filled_grid.astype(int)
         # for our grid,  mineral walls are considered as a barrier between regions
         for point in self.resource_blockers:
             grid[int(point[1])][int(point[0])] = 0
@@ -928,78 +933,78 @@ class MapData:
         """
         self.debugger.draw_influence_in_game(self.bot, grid, lower_threshold, upper_threshold, color, size)
 
-    def plot_map(
-            self,
-            fontdict: dict = None,
-            save: Optional[bool] = None,
-            figsize: int = 20) -> None:
-        """
+    # def plot_map(
+    #         self,
+    #         fontdict: dict = None,
+    #         save: Optional[bool] = None,
+    #         figsize: int = 20) -> None:
+    #     """
 
-        Plot map (does not ``show`` or ``save``)
+    #     Plot map (does not ``show`` or ``save``)
 
-        """
-        if save is not None:
-            logger.warning(CustomDeprecationWarning(oldarg='save', newarg='self.save()'))
-        import inspect
-        logger.error(f"{inspect.stack()[1]}")
-        self.debugger.plot_map(fontdict=fontdict, figsize=figsize)
+    #     """
+    #     if save is not None:
+    #         logger.warning(CustomDeprecationWarning(oldarg='save', newarg='self.save()'))
+    #     import inspect
+    #     logger.error(f"{inspect.stack()[1]}")
+    #     self.debugger.plot_map(fontdict=fontdict, figsize=figsize)
 
-    def plot_influenced_path(self,
-                             start: Union[Tuple[float, float], Point2],
-                             goal: Union[Tuple[float, float], Point2],
-                             weight_array: ndarray,
-                             large: bool = False,
-                             smoothing: bool = False,
-                             name: Optional[str] = None,
-                             fontdict: dict = None) -> None:
-        """
+    # def plot_influenced_path(self,
+    #                          start: Union[Tuple[float, float], Point2],
+    #                          goal: Union[Tuple[float, float], Point2],
+    #                          weight_array: ndarray,
+    #                          large: bool = False,
+    #                          smoothing: bool = False,
+    #                          name: Optional[str] = None,
+    #                          fontdict: dict = None) -> None:
+    #     """
 
-        A useful debug utility method for experimenting with the :mod:`.Pather` module
+    #     A useful debug utility method for experimenting with the :mod:`.Pather` module
 
-        """
+    #     """
 
-        self.debugger.plot_influenced_path(start=start,
-                                           goal=goal,
-                                           weight_array=weight_array,
-                                           large=large,
-                                           smoothing=smoothing,
-                                           name=name,
-                                           fontdict=fontdict)
+    #     self.debugger.plot_influenced_path(start=start,
+    #                                        goal=goal,
+    #                                        weight_array=weight_array,
+    #                                        large=large,
+    #                                        smoothing=smoothing,
+    #                                        name=name,
+    #                                        fontdict=fontdict)
 
-    def plot_influenced_path_nydus(self,
-                             start: Union[Tuple[float, float], Point2],
-                             goal: Union[Tuple[float, float], Point2],
-                             weight_array: ndarray,
-                             large: bool = False,
-                             smoothing: bool = False,
-                             name: Optional[str] = None,
-                             fontdict: dict = None) -> None:
-        """
+    # def plot_influenced_path_nydus(self,
+    #                          start: Union[Tuple[float, float], Point2],
+    #                          goal: Union[Tuple[float, float], Point2],
+    #                          weight_array: ndarray,
+    #                          large: bool = False,
+    #                          smoothing: bool = False,
+    #                          name: Optional[str] = None,
+    #                          fontdict: dict = None) -> None:
+    #     """
 
-        A useful debug utility method for experimenting with the :mod:`.Pather` module
+    #     A useful debug utility method for experimenting with the :mod:`.Pather` module
 
-        """
+    #     """
 
-        self.debugger.plot_influenced_path_nydus(start=start,
-                                           goal=goal,
-                                           weight_array=weight_array,
-                                           large=large,
-                                           smoothing=smoothing,
-                                           name=name,
-                                           fontdict=fontdict)
+    #     self.debugger.plot_influenced_path_nydus(start=start,
+    #                                        goal=goal,
+    #                                        weight_array=weight_array,
+    #                                        large=large,
+    #                                        smoothing=smoothing,
+    #                                        name=name,
+    #                                        fontdict=fontdict)
 
-    def _plot_regions(self, fontdict: Dict[str, Union[str, int]]) -> None:
-        return self.debugger.plot_regions(fontdict=fontdict)
+    # def _plot_regions(self, fontdict: Dict[str, Union[str, int]]) -> None:
+    #     return self.debugger.plot_regions(fontdict=fontdict)
 
-    def _plot_vision_blockers(self) -> None:
-        self.debugger.plot_vision_blockers()
+    # def _plot_vision_blockers(self) -> None:
+    #     self.debugger.plot_vision_blockers()
 
-    def _plot_normal_resources(self) -> None:
-        # todo: account for gold minerals and rich gas
-        self.debugger.plot_normal_resources()
+    # def _plot_normal_resources(self) -> None:
+    #     # todo: account for gold minerals and rich gas
+    #     self.debugger.plot_normal_resources()
 
-    def _plot_chokes(self) -> None:
-        self.debugger.plot_chokes()
+    # def _plot_chokes(self) -> None:
+    #     self.debugger.plot_chokes()
 
     def __repr__(self) -> str:
         return f"<MapData[{self.version}][{self.bot.game_info.map_name}][{self.bot}]>"

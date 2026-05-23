@@ -1,10 +1,10 @@
 import lzma
 import os
 import pickle
+from typing import TYPE_CHECKING, List, Optional, Union
+
 import numpy as np
-
-from typing import List, Optional, TYPE_CHECKING, Union
-
+from MapAnalyzer.constructs import MDRamp, VisionBlockerArea
 from s2clientprotocol.sc2api_pb2 import Response, ResponseObservation
 from sc2.bot_ai import BotAI
 from sc2.game_data import GameData
@@ -13,7 +13,6 @@ from sc2.game_state import GameState
 from sc2.position import Point2
 from sc2.unit import Unit
 
-from MapAnalyzer.constructs import MDRamp, VisionBlockerArea
 from .cext import CMapChoke
 from .destructibles import *
 from .settings import ROOT_DIR
@@ -149,19 +148,21 @@ def fix_map_ramps(bot: BotAI):
            and bot.game_info.placement_grid[(a, b)] == 0
     ]
     ramp_points = [point for point in points if not equal_height_around(point)]
-    vision_blockers = set(point for point in points if equal_height_around(point))
+    vision_blockers = frozenset(point for point in points if equal_height_around(point))
     ramps = [Ramp(group, bot.game_info) for group in bot.game_info._find_groups(ramp_points)]
     return ramps, vision_blockers
 
 
 def get_sets_with_mutual_elements(list_mdchokes: List[CMapChoke],
                                   area: Optional[Union[MDRamp, VisionBlockerArea]] = None,
-                                  base_choke: CMapChoke = None) -> List[List]:
+                                  base_choke: CMapChoke | None = None) -> List[List]:
     li = []
     if area:
         s1 = area.points
-    else:
+    elif base_choke:
         s1 = base_choke.pixels
+    else:
+        raise ValueError("Either area or base_choke must be provided")
     for c in list_mdchokes:
         s2 = c.pixels
         s3 = s1 ^ s2
@@ -195,7 +196,7 @@ def import_bot_instance(
     bot._initialize_variables()
     # noinspection PyProtectedMember
     bot._prepare_start(
-            client=None, player_id=1, game_info=game_info, game_data=game_data
+            client=None, player_id=1, game_info=game_info, game_data=game_data # type: ignore
     )
     # noinspection PyProtectedMember
     bot._prepare_first_step()

@@ -1,15 +1,14 @@
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from loguru import logger
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
-
-from loguru import logger
+from MapAnalyzer.exceptions import OutOfBoundsException, PatherNoPointsException
+from MapAnalyzer.Region import Region
+from MapAnalyzer.utils import change_destructable_status_in_grid
 from numpy import ndarray
 from sc2.ids.unit_typeid import UnitTypeId as UnitID
 from sc2.position import Point2
 
-from MapAnalyzer.exceptions import OutOfBoundsException, PatherNoPointsException
-from MapAnalyzer.Region import Region
-from MapAnalyzer.utils import change_destructable_status_in_grid
 from .cext import astar_path, astar_path_with_nyduses
 from .destructibles import *
 
@@ -50,7 +49,7 @@ class MapAnalyzerPather:
         self.nonpathable_indices_stacked = np.column_stack(
                 (nonpathable_indices[1], nonpathable_indices[0])
         )
-        self.connectivity_graph = None  # set later by MapData
+        self.connectivity_graph: Dict[Region, List[Region]] | None = None  # set later by MapData
 
         self._set_default_grids()
         self.terrain_height = self.map_data.terrain_height.copy().T
@@ -69,9 +68,11 @@ class MapAnalyzerPather:
             self.default_grid[51, 120] = 1
 
         self.default_grid_nodestr = self.default_grid.copy()
+        self.long_range_grid = self.default_grid.copy()
 
         self.destructables_included = {}
         self.minerals_included = {}
+        self.watchtowers_included = {}
 
         # set rocks and mineral walls to pathable in the beginning
         # these will be set nonpathable when updating grids for the destructables
@@ -81,6 +82,7 @@ class MapAnalyzerPather:
             if "unbuildable" not in dest.name.lower() and "acceleration" not in dest.name.lower():
                 change_destructable_status_in_grid(self.default_grid, dest, 0)
                 change_destructable_status_in_grid(self.default_grid_nodestr, dest, 1)
+                change_destructable_status_in_grid(self.long_range_grid, dest, 0)
 
         # set each geyser as non pathable, these don't update during the game
         for geyser in self.map_data.bot.vespene_geyser:
@@ -102,9 +104,23 @@ class MapAnalyzerPather:
             self.default_grid[x2, y] = 0
             self.default_grid_nodestr[x1, y] = 0
             self.default_grid_nodestr[x2, y] = 0
+            if mineral.type_id == UnitTypeId.RICHMINERALFIELD:
+                self.long_range_grid[x1, y] = 0
+                self.long_range_grid[x2, y] = 0
+
+        for watchtower in self.map_data.bot.watchtowers:
+            self.watchtowers_included[watchtower.position] = watchtower
+            left_bottom = watchtower.position.offset(Point2((-1, -1)))
+            x_start = int(left_bottom[0])
+            y_start = int(left_bottom[1])
+            x_end = int(x_start + 2)
+            y_end = int(y_start + 2)
+            self.default_grid[x_start:x_end, y_start:y_end] = 0
+            self.default_grid_nodestr[x_start:x_end, y_start:y_end] = 0
+            self.long_range_grid[x_start:x_end, y_start:y_end] = 0
 
     def set_connectivity_graph(self):
-        connectivity_graph = {}
+        connectivity_graph: Dict[Region, List[Region]] = {}
         for region in self.map_data.regions.values():
             if connectivity_graph.get(region) is None:
                 connectivity_graph[region] = []
@@ -117,6 +133,8 @@ class MapAnalyzerPather:
         if path is None:
             path = []
         graph = self.connectivity_graph
+        if graph is None:
+            raise Exception("Connectivity graph not set")
         path = path + [start]
         if start == goal:
             return [path]
@@ -130,39 +148,22 @@ class MapAnalyzerPather:
                     paths.append(newpath)
         return paths
 
-    def _add_non_pathables_ground(self, grid: ndarray, include_destructables: bool = True) -> ndarray:
+    def _add_non_pathables_ground(self,
+                                  grid: ndarray,
+                                  include_destructables: bool = True,
+                                  include_structures: bool = True) -> ndarray:
         ret_grid = grid.copy()
-        nonpathables = self.map_data.bot.structures.not_flying
-        nonpathables.extend(self.map_data.bot.enemy_structures.not_flying)
-        nonpathables = nonpathables.filter(
-            lambda x: (x.type_id != UnitID.SUPPLYDEPOTLOWERED or x.is_active)
-                      and (x.type_id != UnitID.CREEPTUMOR or not x.is_ready))
+        if include_structures:
+            nonpathables = self.map_data.bot.structures.not_flying
+            nonpathables.extend(self.map_data.bot.enemy_structures.not_flying)
+            nonpathables = nonpathables.filter(
+                lambda x: (x.type_id != UnitID.SUPPLYDEPOTLOWERED or x.is_active)
+                        and (x.type_id != UnitID.CREEPTUMOR or not x.is_ready))
 
-        for obj in nonpathables:
-            size = 1
-            if obj.type_id in buildings_2x2:
-                size = 2
-            elif obj.type_id in buildings_3x3:
-                size = 3
-            elif obj.type_id in buildings_5x5:
-                size = 5
-            left_bottom = obj.position.offset((-size / 2, -size / 2))
-            x_start = int(left_bottom[0])
-            y_start = int(left_bottom[1])
-            x_end = int(x_start + size)
-            y_end = int(y_start + size)
-
-            ret_grid[x_start:x_end, y_start:y_end] = 0
-
-            # townhall sized buildings should have their corner spots pathable
-            if size == 5:
-                ret_grid[x_start, y_start] = 1
-                ret_grid[x_start, y_end - 1] = 1
-                ret_grid[x_end - 1, y_start] = 1
-                ret_grid[x_end - 1, y_end - 1] = 1
+            for structure in nonpathables:
+                self._add_building_to_grid(structure.type_id, structure.position, ret_grid)
 
         if len(self.minerals_included) != self.map_data.bot.mineral_field.amount:
-
             new_positions = set(m.position for m in self.map_data.bot.mineral_field)
             old_mf_positions = set(self.minerals_included)
 
@@ -180,6 +181,9 @@ class MapAnalyzerPather:
 
                 self.default_grid_nodestr[x1, y] = 1
                 self.default_grid_nodestr[x2, y] = 1
+                
+                self.long_range_grid[x1, y] = 1
+                self.long_range_grid[x2, y] = 1
 
                 del self.minerals_included[mf_position]
 
@@ -192,10 +196,51 @@ class MapAnalyzerPather:
                 dest = self.destructables_included[dest_position]
                 change_destructable_status_in_grid(ret_grid, dest, 1)
                 change_destructable_status_in_grid(self.default_grid, dest, 1)
+                change_destructable_status_in_grid(self.long_range_grid, dest, 1)
 
                 del self.destructables_included[dest_position]
 
+        if len(self.watchtowers_included) != self.map_data.bot.watchtowers.amount:
+            new_positions = set(w.position for w in self.map_data.bot.watchtowers)
+            old_watchtower_positions = set(self.watchtowers_included)
+            missing_positions = old_watchtower_positions - new_positions
+
+            for watchtower_position in missing_positions:
+                left_bottom = watchtower_position.offset((-1, -1))
+                x_start = int(left_bottom[0])
+                y_start = int(left_bottom[1])
+                x_end = int(x_start + 2)
+                y_end = int(y_start + 2)
+                ret_grid[x_start:x_end, y_start:y_end] = 1
+                self.default_grid[x_start:x_end, y_start:y_end] = 1
+                self.long_range_grid[x_start:x_end, y_start:y_end] = 1
+
+                del self.watchtowers_included[watchtower_position]
+
         return ret_grid
+
+    def _add_building_to_grid(self, type_id: UnitTypeId, position: Point2, grid: np.ndarray, weight=0):
+        size = 1
+        if type_id in buildings_2x2:
+            size = 2
+        elif type_id in buildings_3x3:
+            size = 3
+        elif type_id in buildings_5x5:
+            size = 5
+        left_bottom = position.offset(Point2((-size / 2, -size / 2)))
+        x_start = int(left_bottom[0])
+        y_start = int(left_bottom[1])
+        x_end = int(x_start + size)
+        y_end = int(y_start + size)
+
+        grid[x_start:x_end, y_start:y_end] = weight
+
+        # townhall sized buildings should have their corner spots pathable
+        if size == 5:
+            grid[x_start, y_start] = 1
+            grid[x_start, y_end - 1] = 1
+            grid[x_end - 1, y_start] = 1
+            grid[x_end - 1, y_end - 1] = 1
 
     def find_eligible_point(self, point: Tuple[float, float], grid: np.ndarray, terrain_height: np.ndarray, max_distance: float) -> Optional[Tuple[int, int]]:
         """
@@ -292,7 +337,10 @@ class MapAnalyzerPather:
         grid = np.where(grid != 0, default_weight, np.inf).astype(np.float32)
         return grid
 
-    def pathfind(self, start: Tuple[float, float], goal: Tuple[float, float], grid: Optional[ndarray] = None,
+    def pathfind(self,
+                 start: Tuple[float, float] | None,
+                 goal: Tuple[float, float] | None,
+                 grid: Optional[ndarray] = None,
                  large: bool = False,
                  smoothing: bool = False,
                  sensitivity: int = 1) -> Optional[List[Point2]]:
@@ -300,14 +348,14 @@ class MapAnalyzerPather:
             logger.warning("Using the default pyastar grid as no grid was provided.")
             grid = self.get_pyastar_grid()
 
-        if start is not None and goal is not None:
-            start = round(start[0]), round(start[1])
-            start = self.find_eligible_point(start, grid, self.terrain_height, 10)
-            goal = round(goal[0]), round(goal[1])
-            goal = self.find_eligible_point(goal, grid, self.terrain_height, 10)
-        else:
+        if start is None or goal is None:
             logger.warning(PatherNoPointsException(start=start, goal=goal))
             return None
+
+        start = round(start[0]), round(start[1])
+        start = self.find_eligible_point(start, grid, self.terrain_height, 10)
+        goal = round(goal[0]), round(goal[1])
+        goal = self.find_eligible_point(goal, grid, self.terrain_height, 10)
 
         # find_eligible_point didn't find any pathable nodes nearby
         if start is None or goal is None:
@@ -331,7 +379,9 @@ class MapAnalyzerPather:
             logger.debug(f"No Path found s{start}, g{goal}")
             return None
 
-    def pathfind_with_nyduses(self, start: Tuple[float, float], goal: Tuple[float, float],
+    def pathfind_with_nyduses(self,
+                              start: Tuple[float, float] | None,
+                              goal: Tuple[float, float] | None,
                               grid: Optional[ndarray] = None,
                               large: bool = False,
                               smoothing: bool = False,
@@ -340,14 +390,14 @@ class MapAnalyzerPather:
             logger.warning("Using the default pyastar grid as no grid was provided.")
             grid = self.get_pyastar_grid()
 
-        if start is not None and goal is not None:
-            start = round(start[0]), round(start[1])
-            start = self.find_eligible_point(start, grid, self.terrain_height, 10)
-            goal = round(goal[0]), round(goal[1])
-            goal = self.find_eligible_point(goal, grid, self.terrain_height, 10)
-        else:
+        if start is None or goal is None:
             logger.warning(PatherNoPointsException(start=start, goal=goal))
             return None
+
+        start = round(start[0]), round(start[1])
+        start = self.find_eligible_point(start, grid, self.terrain_height, 10)
+        goal = round(goal[0]), round(goal[1])
+        goal = self.find_eligible_point(goal, grid, self.terrain_height, 10)
 
         # find_eligible_point didn't find any pathable nodes nearby
         if start is None or goal is None:
@@ -405,11 +455,11 @@ class MapAnalyzerPather:
     ) -> ndarray:
         disk = tuple(draw_circle(position, radius, arr.shape))
 
-        arr: ndarray = self._add_disk_to_grid(
+        updated_array: ndarray = self._add_disk_to_grid(
             position, arr, disk, weight, safe, initial_default_weights
         )
 
-        return arr
+        return updated_array
 
     def add_cost_to_multiple_grids(
         self,

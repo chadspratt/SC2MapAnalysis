@@ -1,8 +1,8 @@
 from functools import lru_cache
-from typing import List, Set, Tuple, TYPE_CHECKING, Union
+from loguru import logger
+from typing import TYPE_CHECKING, List, Set, Tuple, Union
 
 import numpy as np
-from loguru import logger
 from numpy import int64, ndarray
 from sc2.position import Point2
 from scipy.ndimage import center_of_mass
@@ -38,7 +38,9 @@ class Buildables:
         """
         if self.points is None:
             logger.warning("BuildablePoints needs to update first")
-            self.update()
+            self.points = self.update()
+        if self.points is None:
+            return 0.0
         return len(self.points) / len(self.polygon.points)
 
     def update(self) -> None:
@@ -158,19 +160,19 @@ class Polygon:
             areas.extend(new_areas)
         self.areas = list(set(areas))
 
-    def plot(self, testing: bool = False) -> None:  # pragma: no cover
-        """
+    # def plot(self, testing: bool = False) -> None:  # pragma: no cover
+    #     """
 
-        plot
+    #     plot
 
-        """
-        import matplotlib.pyplot as plt
-        plt.style.use("ggplot")
+    #     """
+    #     import matplotlib.pyplot as plt
+    #     plt.style.use("ggplot")
 
-        plt.imshow(self.array, origin="lower")
-        if testing:
-            return
-        plt.show()
+    #     plt.imshow(self.array, origin="lower")
+    #     if testing:
+    #         return
+    #     plt.show()
 
     @property
     @lru_cache()
@@ -210,7 +212,7 @@ class Polygon:
         s2 = max(pl)
         x1, y1 = s1[0], s1[1]
         x2, y2 = s2[0], s2[1]
-        return np.math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
     @property
     @lru_cache()
@@ -224,7 +226,7 @@ class Polygon:
         return points
 
     @property
-    def clean_points(self) -> List[Tuple[int64, int64]]:
+    def clean_points(self) -> List[Tuple[float, float] | Point2]:
         # For internal usage
 
         return list(self._clean_points)  # needs to be array-like for numpy calculations
@@ -283,7 +285,7 @@ class Polygon:
         return edge_indices
 
     @property
-    def perimeter_points(self) -> Set[Tuple[int64, int64]]:
+    def perimeter_points(self) -> Set[Point2]:
         """
 
         Useful method for getting  perimeter points
