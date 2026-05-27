@@ -318,7 +318,7 @@ class MapAnalyzerPather:
         clean_air_grid[area.x:(area.x + area.width), area.y:(area.y + area.height)] = 1
         return np.where(clean_air_grid == 1, default_weight, np.inf).astype(np.float32)
 
-    def get_air_vs_ground_grid(self, default_weight: float) -> ndarray:
+    def get_air_vs_ground_grid(self, default_weight: float, no_ground_weight: float) -> ndarray:
         grid = self.get_pyastar_grid(default_weight=default_weight, include_destructables=True)
         # set non pathable points inside map bounds to value 1
         area = self.map_data.bot.game_info.playable_area
@@ -326,7 +326,7 @@ class MapAnalyzerPather:
         end_x = area.x + area.width
         start_y = area.y
         end_y = area.y + area.height
-        grid[start_x:end_x, start_y:end_y] = np.where(grid[start_x:end_x, start_y:end_y] == np.inf, 1, default_weight)
+        grid[start_x:end_x, start_y:end_y] = np.where(grid[start_x:end_x, start_y:end_y] == np.inf, no_ground_weight, default_weight)
 
         return grid
 

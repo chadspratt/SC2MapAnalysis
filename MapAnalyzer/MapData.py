@@ -229,7 +229,7 @@ class MapData:
         """
         return self.pather.get_climber_grid(default_weight, include_destructables=include_destructables)
 
-    def get_air_vs_ground_grid(self, default_weight: float = 100) -> ndarray:
+    def get_air_vs_ground_grid(self, default_weight: float = 100, no_ground_weight: float = 1) -> ndarray:
         """
         :rtype: numpy.ndarray
         ``air_vs_ground`` grid is computed in a way that lowers the cost of nonpathable terrain,
@@ -253,7 +253,7 @@ class MapData:
             * :meth:`.MapData.find_lowest_cost_points`
 
         """
-        return self.pather.get_air_vs_ground_grid(default_weight=default_weight)
+        return self.pather.get_air_vs_ground_grid(default_weight=default_weight, no_ground_weight=no_ground_weight)
 
     def get_clean_air_grid(self, default_weight: float = 1) -> ndarray:
         """
